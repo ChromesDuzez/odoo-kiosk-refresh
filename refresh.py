@@ -131,9 +131,13 @@ def cmd_pair(host: str | None) -> int:
     config["agent_port"] = port or config.get("agent_port") or 8765
     config["shared_secret"] = secret
 
+    # claim=1 tells the display to record this machine as the one allowed to
+    # talk to it. It also re-claims a display already locked to a different
+    # address, which is how a POS computer recovers from a changed DHCP lease
+    # without anyone having to go and edit the config on the display.
     print(f"\nChecking {config['agent_host']}:{config['agent_port']}...")
     try:
-        result = call(config, "GET", "/status")
+        result = call(config, "GET", "/status?claim=1")
     except SystemExit as exc:
         message = str(exc)
         if "401" in message:
@@ -142,6 +146,8 @@ def cmd_pair(host: str | None) -> int:
                 "Check it against the screen -- it is 12 characters in three groups.",
                 file=sys.stderr,
             )
+        elif "403" in message:
+            print(f"\n{message}", file=sys.stderr)
         else:
             print(f"\n{message}", file=sys.stderr)
         print("\nNothing was saved.", file=sys.stderr)
@@ -160,8 +166,22 @@ def cmd_pair(host: str | None) -> int:
     return 0
 
 
-def call(config: dict, method: str, path: str, payload: dict | None = None) -> dict:
-    """Send one signed request to the agent and return its JSON reply."""
+def call(
+    config: dict,
+    method: str,
+    path: str,
+    payload: dict | None = None,
+    allow_reclaim: bool = True,
+) -> dict:
+    """
+    Send one signed request to the agent and return its JSON reply.
+
+    If the display refuses us because this computer's address is not the one it
+    was paired with, re-claim it and retry once. That address changes on its own
+    whenever a DHCP lease moves, and without this every command would start
+    failing until somebody noticed and re-ran `pair` by hand. Re-claiming needs
+    the pairing code, which we are already proving we hold by signing.
+    """
     body = json.dumps(payload).encode("utf-8") if payload is not None else b""
     url = f"http://{config['agent_host']}:{config['agent_port']}{path}"
 
@@ -177,11 +197,20 @@ def call(config: dict, method: str, path: str, payload: dict | None = None) -> d
     except urllib.error.HTTPError as exc:
         # The agent explains its refusals in the body; surfacing that is the
         # difference between "403" and "that host is not on the allowlist".
-        detail = ""
+        detail, reason = "", ""
         try:
-            detail = json.loads(exc.read().decode("utf-8")).get("error", "")
+            parsed = json.loads(exc.read().decode("utf-8"))
+            detail = parsed.get("error", "")
+            reason = parsed.get("reason", "")
         except (ValueError, OSError):
             pass
+
+        if exc.code == 403 and reason == "client_not_allowed" and allow_reclaim:
+            print("  (this computer's address has changed -- re-claiming the display)")
+            separator = "&" if "?" in path else "?"
+            return call(config, method, f"{path}{separator}claim=1", payload,
+                        allow_reclaim=False)
+
         raise SystemExit(f"Display refused the request ({exc.code}): {detail or exc.reason}") from None
     except urllib.error.URLError as exc:
         raise SystemExit(

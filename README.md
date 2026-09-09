@@ -86,17 +86,29 @@ Two controls protect the display:
   nobody could ever use. It still needs the pairing code, and the worst it can
   do — a blank screen until someone restarts it — is obvious and recoverable,
   unlike a repointed display.
-- **A host allowlist.** A new URL must parse to a hostname you listed in
-  `agent.config.json`. This is the control that actually matters: even if the
-  shared secret leaked, the display can only ever be pointed at another page on
-  your own Odoo server — never at an attacker's page. The check compares the
-  *parsed* hostname exactly, so `yourcompany.odoo.com.evil.net` is rejected.
+- **A client lock.** Pairing records the address of the machine that paired,
+  and from then on only that machine is accepted.
 
-  Set `"allowed_hosts": ["*"]` to turn this off and allow any host — handy for
-  putting something else on the screen for a laugh. Just know what it costs:
-  the allowlist is the layer that limits the damage of a leaked pairing code,
-  so with it off, the code is the only thing standing between the LAN and
-  whatever appears in front of customers. Easy to flip back.
+  **This repairs itself.** If the POS computer's address changes — a DHCP lease
+  moving is the usual reason — the next command notices the refusal, re-claims
+  the display and retries, printing one line to say so. Nothing to notice, no
+  command to re-run. New addresses are added rather than swapped in, so two POS
+  computers can share one display without taking it from each other, and the
+  list is capped at 8 with the oldest dropped. Re-claiming needs the pairing
+  code, so this is a convenience layer rather than a barrier against someone
+  who already has the code. Stale entries are harmless: the list only filters
+  who may *ask*, and every request still has to be correctly signed.
+
+- **A host allowlist.** A new URL must parse to a hostname listed in
+  `agent.config.json`. **This defaults to `["*"]`, which accepts any host** —
+  the useful default, since the point of the tool is to put a page on a screen.
+
+  Narrow it to `["yourcompany.odoo.com"]` if you want the stronger guarantee:
+  with a specific host listed, even a leaked pairing code could only ever point
+  the display at another page on your own Odoo server, never at an attacker's.
+  The check compares the *parsed* hostname exactly, so
+  `yourcompany.odoo.com.evil.net` is rejected. Worth doing on the real shop
+  display; leave it open while you are playing with it.
 
 The traffic is plain HTTP on your LAN. That is fine here because the signature
 is what provides authenticity, and the allowlist bounds the damage — but it does
@@ -131,17 +143,18 @@ the config to fill in the rest:
 ```jsonc
 {
   "listen_port": 8765,
-  "shared_secret": "K7MQ3XRT9PBW",             // already filled in, leave it
-  "url": "https://yourcompany.odoo.com/...",   // the display URL from Odoo
-  "allowed_hosts": ["yourcompany.odoo.com"],   // required; ["*"] allows any host
-  "allowed_clients": ["192.168.1.50"],         // optional: only the POS computer
-  "chrome_path": "auto",
+  "shared_secret": "K7MQ3XRT9PBW",   // already filled in, leave it
+  "url": "",                         // optional; you can send it after pairing
+  "allowed_hosts": ["*"],            // any host by default; narrow it to lock down
+  "allowed_clients": [],             // fills in on pairing; self-repairs on IP change
+  "chrome_path": "auto",             // set a full path if Chrome is somewhere odd
   "restart_if_chrome_exits": true
 }
 ```
 
-`allowed_clients` is worth filling in — with it, only the POS computer can even
-attempt a request. Leave it `[]` to accept any address on the network.
+It works as written — you do not have to change anything to get started.
+`allowed_clients` fills itself in when you pair, and `chrome_path: "auto"` finds
+Chrome in the usual places on Windows, Linux and macOS.
 
 To get `url`: in Odoo, **Point of Sale → Configuration → your POS →
 Customer Display**. It is the same URL you originally set the kiosk up with. You

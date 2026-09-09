@@ -12,15 +12,19 @@ That is the whole surface. The agent has no idea Odoo exists and holds no
 Odoo credentials -- deliberately, because this machine is the insecure one.
 Anything that needs a login happens on the POS computer instead.
 
-Two things stand between the LAN and the display:
+Three things stand between the LAN and the display:
 
-  * every request is HMAC-signed with a shared secret (see wire.py), and
-  * a new URL must parse to a hostname on the configured allowlist,
+  * every request is HMAC-signed with a shared secret (see wire.py),
+  * once paired, only the machine that paired is accepted, and
+  * a new URL must parse to a hostname on the configured allowlist.
 
-so even if the secret leaked, the worst anyone could do is point the display
-at a different page on your own Odoo server.
+The first is the one that matters; the other two are layers on top. Note that
+allowed_hosts defaults to ["*"], which accepts any host -- narrow it to your
+Odoo host if you want the guarantee that the display can only ever show a page
+from your own server.
 
-Standard library only. Tested against Python 3.11 and 3.13 on Windows.
+Standard library only, and no third-party packages. Developed for Windows;
+Chrome is located per-platform, so it also runs on Linux and macOS.
 
 Setup needs no typing on this machine beyond starting it. Until the POS
 computer has talked to us once, Chrome shows a full-screen pairing page with
@@ -48,6 +52,7 @@ import argparse
 import errno
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -71,10 +76,39 @@ IS_WINDOWS = os.name == "nt"
 # Keeps Chrome and taskkill from flashing a console window on the display.
 NO_WINDOW = subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0
 
-CHROME_CANDIDATES = [
-    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+if IS_WINDOWS:
+    CHROME_CANDIDATES = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+    ]
+elif sys.platform == "darwin":
+    CHROME_CANDIDATES = [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        os.path.expanduser(
+            "~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        ),
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    ]
+else:
+    CHROME_CANDIDATES = [
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/opt/google/chrome/chrome",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/snap/bin/chromium",
+        "/var/lib/flatpak/exports/bin/com.google.Chrome",
+    ]
+
+# Tried after the fixed paths above, since a distribution may put the browser
+# somewhere none of them cover but still have it on PATH.
+CHROME_ON_PATH = [
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
+    "chrome",
 ]
 
 DEFAULT_CONFIG = {
@@ -82,7 +116,12 @@ DEFAULT_CONFIG = {
     "listen_port": 8765,
     "shared_secret": "",
     "url": "",
-    "allowed_hosts": [],
+    # Any host by default. A fresh config that refuses every URL is a trap --
+    # the point of the tool is to put a page on the display, and the first
+    # thing a locked-down default does is stop that working with an error that
+    # reads like a bug. Narrow it to your Odoo host if you want the tighter
+    # guarantee; see the allowlist note in the README for what that buys.
+    "allowed_hosts": ["*"],
     "allowed_schemes": ["https"],
     "allowed_clients": [],
     "chrome_path": "auto",
@@ -97,6 +136,11 @@ DEFAULT_CONFIG = {
 
 PAIRING_PAGE = HERE / "pairing.html"
 WAITING_PAGE = HERE / "waiting.html"
+
+# How many addresses may be remembered in allowed_clients. Enough for a couple
+# of POS computers plus a history of DHCP leases, capped so the list cannot
+# grow forever.
+MAX_ALLOWED_CLIENTS = 8
 
 
 # --------------------------------------------------------------------------
@@ -170,11 +214,12 @@ def cmd_init() -> int:
     save_config(config)
 
     print(f"Wrote {CONFIG_PATH}\n")
-    print("Now edit it and fill in:")
-    print('  "url"            the customer display URL from Odoo')
-    print('  "allowed_hosts"  e.g. ["yourcompany.odoo.com"] -- the display can')
-    print("                   only ever be pointed at a host in this list.")
-    print('                   Use ["*"] to allow any host at all.')
+    print("It works as-is. Optionally set:")
+    print('  "url"            the customer display URL from Odoo, if you have')
+    print("                   it handy -- otherwise send it after pairing")
+    print('  "allowed_hosts"  currently ["*"], so any host is accepted. Narrow')
+    print('                   it to e.g. ["yourcompany.odoo.com"] to guarantee')
+    print("                   the display can only ever show your own server")
     print("\nThen start the agent. It will show this pairing code on the screen,")
     print("so you do not have to copy anything off this machine by hand:\n")
     print(f"  {wire.format_pairing_code(config['shared_secret'])}\n")
@@ -397,9 +442,17 @@ def find_chrome(configured: str) -> str:
     for candidate in CHROME_CANDIDATES:
         if candidate and Path(candidate).exists():
             return candidate
+
+    for name in CHROME_ON_PATH:
+        found = shutil.which(name)
+        if found:
+            return found
+
+    binary = "chrome.exe" if IS_WINDOWS else "Chrome or Chromium"
     raise SystemExit(
-        "Could not find chrome.exe automatically.\n"
-        'Set "chrome_path" in agent.config.json to its full path.'
+        f"Could not find {binary} automatically.\n"
+        'Set "chrome_path" in agent.config.json to its full path.\n'
+        "Looked in:\n  " + "\n  ".join(CHROME_CANDIDATES)
     )
 
 
@@ -591,7 +644,6 @@ def make_handler(config: dict, chrome: ChromeSupervisor, request_shutdown=None):
     seen_nonces: dict[str, float] = {}
     nonce_lock = threading.Lock()
     secret = config["shared_secret"]
-    allowed_clients = [c.strip() for c in config.get("allowed_clients") or [] if c.strip()]
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "KioskDisplayAgent/1.0"
@@ -620,8 +672,9 @@ def make_handler(config: dict, chrome: ChromeSupervisor, request_shutdown=None):
             return self.rfile.read(length) if length else b""
 
         def _authenticate(self, body: bytes) -> None:
-            if allowed_clients and self.client_address[0] not in allowed_clients:
-                raise wire.AuthError(f"client {self.client_address[0]} is not in allowed_clients")
+            # Signature only. The client allowlist is applied after this, in
+            # _dispatch, so that a rejection can explain itself and so a
+            # deliberate re-claim can override it.
             with nonce_lock:
                 wire.verify(
                     secret,
@@ -658,27 +711,78 @@ def make_handler(config: dict, chrome: ChromeSupervisor, request_shutdown=None):
             # what pairing was waiting to establish -- so the code comes off
             # the screen and the customer display goes back up, with no
             # separate pairing endpoint and nothing unauthenticated exposed.
+            peer = self.client_address[0]
+
+            # "claim=1" rides in the query string rather than a header so that
+            # it falls inside the signed path -- a header could be bolted onto
+            # an intercepted request, a query string cannot.
+            route = urlparse(self.path).path
+            claiming = "claim=1" in urlparse(self.path).query
+            allowed = [c.strip() for c in (config.get("allowed_clients") or []) if c.strip()]
+
+            # The allowlist is a second, weaker layer on top of the signature:
+            # anyone able to sign already holds the pairing code. So a caller
+            # that can sign is allowed to take the display over deliberately,
+            # which is what stops a DHCP lease change from locking the POS
+            # computer out with no way back short of walking to the display.
+            if allowed and peer not in allowed and not claiming:
+                log(f"refused {self.command} {self.path} from {peer}: not in allowed_clients {allowed}")
+                self._send(403, {
+                    # The reason code lets the client recognise this exact case
+                    # and re-claim by itself. Matching on the prose would break
+                    # the moment the wording changed.
+                    "reason": "client_not_allowed",
+                    "expected": allowed,
+                    "you": peer,
+                    "error": (
+                        f"this display only accepts requests from {', '.join(allowed)}, "
+                        f"and you are {peer}. Run 'refresh.py pair' from this machine "
+                        f"to take it over, or edit allowed_clients on the display."
+                    ),
+                })
+                return
+
+            dirty = False
             newly_paired = False
             if not config.get("paired"):
+                # First pairing starts the list clean.
                 config["paired"] = True
-                save_config(config)
-                log(f"paired with {self.client_address[0]}")
+                config["allowed_clients"] = [peer]
                 newly_paired = True
+                dirty = True
+                log(f"paired with {peer}; allowed_clients set to [{peer}]")
 
-            if self.path == "/status" and self.command == "GET":
+            elif claiming and peer not in allowed:
+                # Add rather than replace. Replacing would make two POS
+                # computers sharing one display take it from each other on
+                # every request, re-claiming and rewriting the config each
+                # time. Newest first, oldest evicted past the cap, so a run of
+                # DHCP changes cannot grow the list without bound.
+                #
+                # Stale entries are harmless: this list only filters *who may
+                # ask*, and every request still has to carry a valid signature.
+                merged = [peer] + [a for a in allowed if a != peer]
+                config["allowed_clients"] = merged[:MAX_ALLOWED_CLIENTS]
+                dirty = True
+                log(f"{peer} claimed access; allowed_clients now {config['allowed_clients']}")
+
+            if dirty:
+                save_config(config)
+
+            if route == "/status" and self.command == "GET":
                 if newly_paired:
                     chrome.clear_pairing_screen()
                 self._send(200, {"ok": True, "newly_paired": newly_paired, **chrome.status()})
                 return
 
-            if self.path == "/refresh" and self.command == "POST":
+            if route == "/refresh" and self.command == "POST":
                 log(f"reload requested by {self.client_address[0]}")
                 chrome.drop_pairing_override()
                 chrome.restart()
                 self._send(200, {"ok": True, "newly_paired": newly_paired, **chrome.status()})
                 return
 
-            if self.path == "/url" and self.command == "POST":
+            if route == "/url" and self.command == "POST":
                 try:
                     payload = json.loads(body.decode("utf-8")) if body else {}
                 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -699,7 +803,7 @@ def make_handler(config: dict, chrome: ChromeSupervisor, request_shutdown=None):
                 self._send(200, {"ok": True, "newly_paired": newly_paired, **chrome.status()})
                 return
 
-            if self.path == "/shutdown" and self.command == "POST":
+            if route == "/shutdown" and self.command == "POST":
                 # Deliberately reachable from the POS computer, not just from
                 # loopback. The display is a full-screen kiosk whose watchdog
                 # relaunches Chrome within seconds, on a laptop with no usable
