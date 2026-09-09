@@ -13,6 +13,7 @@ Two pieces, both stdlib-only Python — nothing to `pip install`, no venv:
 | `Refresh Display.cmd` | POS computer | Double-click wrapper around `refresh.py` |
 | `Change Display URL.cmd` | POS computer | Double-click wrapper that prompts for a paste |
 | `Pair With Display.cmd` | POS computer | One-time setup wrapper |
+| `Stop Agent.cmd` | display laptop | Stops the agent (it has no window to close) |
 | `Install Agent.cmd` | display laptop | Autostart at logon + firewall rule |
 | `Uninstall.cmd` | either | Removes it again; run on both machines |
 
@@ -157,6 +158,33 @@ display to print the code again. To put it back on the screen instead, set
 `"paired": false` in `agent.config.json` and restart the agent.
 
 ## Troubleshooting
+
+**I can't find the agent to stop it.** It runs under `pythonw.exe`, which has no
+window and no console, so closing the Chrome window does nothing to it — and a
+few seconds later its watchdog puts Chrome straight back. Double-click **Stop
+Agent** on the display, or run `python display_agent.py stop`. In Task Manager
+it only appears under the **Details** tab, never under Processes. To find it by
+hand from PowerShell:
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" |
+  Select-Object ProcessId, CommandLine | Format-List
+
+Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" |
+  Where-Object { $_.CommandLine -like '*display_agent.py*' } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+```
+
+**Starting the agent seems to do nothing.** Almost always a second copy is
+already running and holding the port, so the new one exits immediately — and
+with no console, invisibly. Stop the old one first as above. The log at
+`agent.log` records the reason; look for `cannot listen on`. To see what holds
+the port: `Get-NetTCPConnection -LocalPort 8765 -State Listen`.
+
+**The display says "nothing to show yet".** It is paired and working, but no URL
+has been set. Send one with **Change Display URL**. If that screen also warns
+that `allowed_hosts` is empty, every URL will be refused until you set it — put
+your Odoo host in it, or `["*"]` to allow anything, then restart the agent.
 
 **"Could not reach the display"** — the laptop is off, on a different network,
 the agent is not running, or the firewall rule is missing. Confirm the agent is

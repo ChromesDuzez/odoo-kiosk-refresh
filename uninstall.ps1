@@ -249,6 +249,7 @@ if ($Purge) {
             @{ Path = $ClientConfig;                    Label = 'refresh.config.json (holds the pairing code)' }
             @{ Path = (Join-Path $Root 'agent.log');    Label = 'agent.log' }
             @{ Path = (Join-Path $Root 'pairing.html'); Label = 'pairing.html' }
+            @{ Path = (Join-Path $Root 'waiting.html'); Label = 'waiting.html' }
             @{ Path = $ProfileDir;                      Label = 'chrome-profile folder' }
             @{ Path = (Join-Path $Root '__pycache__');  Label = '__pycache__' }
         ) | Where-Object { Test-Path $_.Path }

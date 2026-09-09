@@ -4,6 +4,8 @@ refresh.config.json
 
 # Runtime junk.
 agent.log
+pairing.html
+waiting.html
 chrome-profile/
 __pycache__/
 *.pyc

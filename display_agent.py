@@ -33,18 +33,26 @@ proves the other machine has the code, and the display returns to normal.
 Usage:
     python display_agent.py init       write a starter config and a pairing code
     python display_agent.py run        launch Chrome and serve requests
+    python display_agent.py stop       stop a running agent on this machine
     python display_agent.py show-code  print the pairing code and this IP
     python display_agent.py set URL    change the saved URL locally, no network
+
+The agent runs under pythonw.exe with no window and no console, so `stop` is
+the intended way to end it -- it will not be obvious in Task Manager's default
+view (look under Details, not Processes).
 """
 
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import socket
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 import threading
 import time
 from datetime import datetime
@@ -88,6 +96,7 @@ DEFAULT_CONFIG = {
 }
 
 PAIRING_PAGE = HERE / "pairing.html"
+WAITING_PAGE = HERE / "waiting.html"
 
 
 # --------------------------------------------------------------------------
@@ -214,6 +223,61 @@ def local_ip() -> str:
         sock.close()
 
 
+# Shared by both local screens. Sizing notes, since these must fit any panel
+# without a scrollbar:
+#
+#  * border-box everywhere, so the body's padding counts inside its 100% height
+#    rather than adding to it. That overflow is what put a scrollbar on the page
+#    originally -- 4vh of padding on a 681px viewport is the 54px it overflowed.
+#  * text scales on min(vw, vh) so it shrinks for a short screen as well as a
+#    narrow one. The code's vw figure is bounded by its own width: 14 characters
+#    at roughly 0.6em each, plus letter-spacing and padding, comes to about
+#    10.3em, so 8.5vw keeps it inside the viewport with room to spare.
+#  * overflow: hidden is the backstop, so an unexpected font metric can never
+#    reintroduce a scrollbar.
+#
+# Not an f-string, so the CSS braces need no doubling.
+PAGE_CSS = """
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; overflow: hidden; }
+  body {
+    background: #12161c; color: #e8edf4; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center;
+    font-family: "Segoe UI", system-ui, sans-serif; padding: 3vh 3vw;
+  }
+  h1 { font-size: min(3.2vw, 5vh); font-weight: 600; margin: 0 0 .5em;
+       line-height: 1.2; }
+  p  { font-size: min(1.7vw, 2.6vh); color: #9aa7b8; margin: 0 0 4vh;
+       max-width: 32em; line-height: 1.5; }
+  .label { font-size: min(1.2vw, 1.9vh); letter-spacing: .18em;
+           text-transform: uppercase; color: #7c8ba0; margin-bottom: .8em; }
+  .code {
+    font-family: Consolas, "SF Mono", monospace; font-weight: 700;
+    font-size: min(8.5vw, 13vh); letter-spacing: .06em; line-height: 1.1;
+    color: #7fd4ff; background: #1b2330; border-radius: .12em;
+    padding: .3em .45em; margin-bottom: 4vh; white-space: nowrap;
+    max-width: 100%;
+  }
+  .addr { font-family: Consolas, "SF Mono", monospace;
+          font-size: min(2.8vw, 4.2vh); color: #e8edf4; white-space: nowrap; }
+  .warn { color: #ffcf70; font-size: min(1.7vw, 2.6vh); margin-top: 4vh;
+          max-width: 36em; line-height: 1.5; }
+  .warn code { background: #2a2010; padding: .1em .35em; border-radius: .2em; }
+  footer { margin-top: 4vh; font-size: min(1.4vw, 2.1vh); color: #6b7a8d; }
+"""
+
+
+def _write_page(path: Path, title: str, body: str) -> str:
+    """Wrap a body fragment in the shared shell and return a file:// URL."""
+    html = (
+        '<!doctype html>\n<html><head><meta charset="utf-8">'
+        f"<title>{title}</title><style>{PAGE_CSS}</style></head>\n"
+        f"<body>\n{body}\n</body></html>\n"
+    )
+    path.write_text(html, encoding="utf-8")
+    return path.resolve().as_uri()
+
+
 def write_pairing_page(config: dict) -> str:
     """
     Render the pairing screen and return a file:// URL for Chrome.
@@ -223,58 +287,43 @@ def write_pairing_page(config: dict) -> str:
     Big enough to read from across the counter.
     """
     code = wire.format_pairing_code(config["shared_secret"])
-    address = local_ip()
-    port = config.get("listen_port", 8765)
-
-    # Sizing notes, since this has to fit any screen without a scrollbar:
-    #
-    #  * border-box everywhere, so the body's padding counts inside its 100%
-    #    height rather than adding to it -- that overflow is what put a scroll
-    #    bar on the page in the first place.
-    #  * the code scales on min(vw, vh) so it shrinks for a short screen as
-    #    well as a narrow one. The vw figure is bounded by the code's own
-    #    width: 14 characters at roughly 0.6em each, plus letter-spacing and
-    #    padding, comes to about 10.3em, so 8.5vw keeps it inside the viewport
-    #    with room to spare.
-    #  * overflow: hidden is the backstop, so an unexpected font metric can
-    #    never reintroduce a scrollbar.
-    html = f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>Pairing</title><style>
-  *, *::before, *::after {{ box-sizing: border-box; }}
-  html, body {{ height: 100%; margin: 0; overflow: hidden; }}
-  body {{
-    background: #12161c; color: #e8edf4; display: flex; flex-direction: column;
-    align-items: center; justify-content: center; text-align: center;
-    font-family: "Segoe UI", system-ui, sans-serif; padding: 3vh 3vw; gap: 0;
-  }}
-  h1 {{ font-size: min(3.2vw, 5vh); font-weight: 600; margin: 0 0 .5em;
-        line-height: 1.2; }}
-  p  {{ font-size: min(1.7vw, 2.6vh); color: #9aa7b8; margin: 0 0 4vh;
-        max-width: 32em; line-height: 1.5; }}
-  .label {{ font-size: min(1.2vw, 1.9vh); letter-spacing: .18em;
-            text-transform: uppercase; color: #7c8ba0; margin-bottom: .8em; }}
-  .code {{
-    font-family: Consolas, "SF Mono", monospace; font-weight: 700;
-    font-size: min(8.5vw, 13vh); letter-spacing: .06em; line-height: 1.1;
-    color: #7fd4ff; background: #1b2330; border-radius: .12em;
-    padding: .3em .45em; margin-bottom: 4vh; white-space: nowrap;
-    max-width: 100%;
-  }}
-  .addr {{ font-family: Consolas, "SF Mono", monospace;
-           font-size: min(2.8vw, 4.2vh); color: #e8edf4; white-space: nowrap; }}
-  footer {{ margin-top: 4vh; font-size: min(1.4vw, 2.1vh); color: #6b7a8d; }}
-</style></head><body>
-  <h1>Customer display &mdash; not paired yet</h1>
+    body = f"""  <h1>Customer display &mdash; not paired yet</h1>
   <p>On the POS computer, run <strong>Pair With Display</strong> and enter these.</p>
   <div class="label">Pairing code</div>
   <div class="code">{code}</div>
   <div class="label">This display's address</div>
-  <div class="addr">{address}:{port}</div>
-  <footer>This screen disappears by itself once pairing succeeds.</footer>
-</body></html>
-"""
-    PAIRING_PAGE.write_text(html, encoding="utf-8")
-    return PAIRING_PAGE.resolve().as_uri()
+  <div class="addr">{local_ip()}:{config.get("listen_port", 8765)}</div>
+  <footer>This screen disappears by itself once pairing succeeds.</footer>"""
+    return _write_page(PAIRING_PAGE, "Pairing", body)
+
+
+def write_waiting_page(config: dict) -> str:
+    """
+    Render the "paired, but nothing to show yet" screen.
+
+    Without this the display would sit on a blank desktop whenever no URL is
+    configured -- which gives no clue what is wrong, and is exactly the state
+    reached by pairing before a URL has been set. Worse, if allowed_hosts is
+    still empty then every URL sent from the POS computer is refused, so the
+    blank screen would never resolve on its own. That specific dead end is
+    called out here rather than left to be discovered.
+    """
+    warning = ""
+    if not (config.get("allowed_hosts") or []):
+        warning = (
+            '\n  <div class="warn"><code>allowed_hosts</code> is empty in '
+            "agent.config.json, so every URL sent to this display will be refused. "
+            "Set it to your Odoo host &mdash; or to <code>[&quot;*&quot;]</code> to "
+            "allow any host &mdash; then restart the agent.</div>"
+        )
+
+    body = f"""  <h1>Customer display &mdash; nothing to show yet</h1>
+  <p>Paired and listening. Send it a page from the POS computer with
+     <strong>Change Display URL</strong>.</p>
+  <div class="label">This display's address</div>
+  <div class="addr">{local_ip()}:{config.get("listen_port", 8765)}</div>{warning}
+  <footer>This screen goes away as soon as a URL arrives.</footer>"""
+    return _write_page(WAITING_PAGE, "Waiting for a URL", body)
 
 
 # --------------------------------------------------------------------------
@@ -389,8 +438,10 @@ class ChromeSupervisor:
     def _launch(self) -> None:
         url = self._target_url()
         if not url:
-            log("no URL configured; not launching Chrome")
-            return
+            # Never leave the customer looking at a bare desktop: say what the
+            # display is waiting for instead.
+            url = write_waiting_page(self.config)
+            log("no URL configured; showing the waiting screen")
 
         self.user_data_dir.mkdir(parents=True, exist_ok=True)
         args = [
@@ -521,7 +572,9 @@ class ChromeSupervisor:
             if not self.config.get("restart_if_chrome_exits", True):
                 continue
             with self.lock:
-                if self.stopping or not self._target_url():
+                # No check for a configured URL any more: with the waiting
+                # screen there is always something to keep on screen.
+                if self.stopping:
                     continue
                 died = self.proc is None or self.proc.poll() is not None
                 if died:
@@ -534,7 +587,7 @@ class ChromeSupervisor:
 # --------------------------------------------------------------------------
 
 
-def make_handler(config: dict, chrome: ChromeSupervisor):
+def make_handler(config: dict, chrome: ChromeSupervisor, request_shutdown=None):
     seen_nonces: dict[str, float] = {}
     nonce_lock = threading.Lock()
     secret = config["shared_secret"]
@@ -646,6 +699,22 @@ def make_handler(config: dict, chrome: ChromeSupervisor):
                 self._send(200, {"ok": True, "newly_paired": newly_paired, **chrome.status()})
                 return
 
+            if self.path == "/shutdown" and self.command == "POST":
+                # Loopback only. Stopping the display is local maintenance, so
+                # even a correctly-signed request from elsewhere on the LAN is
+                # refused -- otherwise anyone holding the pairing code could
+                # black out the screen from across the shop.
+                if self.client_address[0] not in ("127.0.0.1", "::1"):
+                    self._send(403, {"error": "shutdown can only be requested from the display itself"})
+                    return
+                log("shutdown requested locally")
+                # Answer before stopping, or the caller sees a dropped
+                # connection rather than a confirmation.
+                self._send(200, {"ok": True, "stopping": True})
+                if request_shutdown is not None:
+                    request_shutdown()
+                return
+
             self._send(404, {"error": f"no such endpoint: {self.command} {self.path}"})
 
     return Handler
@@ -663,7 +732,45 @@ def cmd_run() -> int:
         log("WARNING: allowed_hosts is empty -- reloads will work, but no new URL can be set")
 
     chrome = ChromeSupervisor(config)
-    log(f"agent starting on {config['listen_host']}:{config['listen_port']}")
+    host, port = config["listen_host"], int(config["listen_port"])
+
+    # The server object is not built until after the handler needs to be able
+    # to reach it, so it arrives by way of this holder.
+    server_holder: dict = {}
+
+    def request_shutdown() -> None:
+        srv = server_holder.get("server")
+        if srv is not None:
+            # serve_forever() cannot be stopped from the thread serving the
+            # request, so hand the stop to another one.
+            threading.Thread(target=srv.shutdown, daemon=True).start()
+
+    handler = make_handler(config, chrome, request_shutdown)
+
+    # Bind BEFORE launching Chrome. A second copy of the agent would otherwise
+    # put another Chrome on screen, fail to take the port, and exit -- and
+    # under pythonw.exe there is no console for that error to appear in, so it
+    # looks simply like nothing happened.
+    try:
+        server = ThreadingHTTPServer((host, port), handler)
+    except OSError as exc:
+        in_use = (
+            getattr(exc, "errno", None) == errno.EADDRINUSE
+            or getattr(exc, "winerror", None) == 10048
+        )
+        log(f"FATAL: cannot listen on {host}:{port} -- {exc}")
+        hint = ""
+        if in_use:
+            hint = (
+                "Another copy of the agent is almost certainly already running.\n"
+                f"Stop it with:  python {Path(__file__).name} stop"
+            )
+            log(hint.replace("\n", " "))
+        raise SystemExit(f"Cannot listen on {host}:{port}: {exc}\n{hint}".rstrip())
+
+    server_holder["server"] = server
+    server.daemon_threads = True
+    log(f"agent listening on {host}:{port}")
 
     if not config.get("paired"):
         code = wire.format_pairing_code(config["shared_secret"])
@@ -675,10 +782,6 @@ def cmd_run() -> int:
     watchdog = threading.Thread(target=chrome.watch, daemon=True, name="chrome-watchdog")
     watchdog.start()
 
-    handler = make_handler(config, chrome)
-    server = ThreadingHTTPServer((config["listen_host"], int(config["listen_port"])), handler)
-    server.daemon_threads = True
-
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -686,6 +789,41 @@ def cmd_run() -> int:
     finally:
         server.server_close()
         chrome.shutdown()
+        WAITING_PAGE.unlink(missing_ok=True)
+    log("agent stopped")
+    return 0
+
+
+def cmd_stop() -> int:
+    """
+    Ask a running agent on this machine to stop.
+
+    Goes through the same signed HTTP interface rather than hunting for a
+    process, which means it works however the agent was started -- and matters
+    on this machine in particular, where the agent runs under pythonw.exe with
+    no window and no console and so is genuinely hard to find by hand.
+    """
+    config = load_config()
+    port = int(config.get("listen_port", 8765))
+    body = b"{}"
+    headers = wire.build_headers(config["shared_secret"], "POST", "/shutdown", body)
+    headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/shutdown", data=body, headers=headers, method="POST"
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            response.read()
+    except urllib.error.URLError as exc:
+        print(f"Nothing answering on 127.0.0.1:{port} -- the agent is probably not running.")
+        print(f"  ({getattr(exc, 'reason', exc)})\n")
+        print("If you think it is running anyway, find it from PowerShell with:")
+        print("  Get-CimInstance Win32_Process -Filter \"Name='pythonw.exe' OR Name='python.exe'\" |")
+        print("    Select-Object ProcessId, CommandLine | Format-List")
+        return 1
+
+    print("Agent stopped, and its Chrome window with it.")
     return 0
 
 
@@ -711,6 +849,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("init", help="write a starter config with a fresh pairing code")
     sub.add_parser("run", help="launch Chrome and serve refresh requests (default)")
+    sub.add_parser("stop", help="stop the agent running on this machine")
     sub.add_parser("show-code", help="print the pairing code and this machine's address")
     set_parser = sub.add_parser("set", help="change the saved URL locally, without the network")
     set_parser.add_argument("url")
@@ -718,6 +857,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == "init":
         return cmd_init()
+    if args.command == "stop":
+        return cmd_stop()
     if args.command == "show-code":
         return cmd_show_code()
     if args.command == "set":
