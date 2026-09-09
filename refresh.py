@@ -6,6 +6,7 @@ Customer display remote -- runs on the POS computer.
     python refresh.py set          paste in a new URL, then reload
     python refresh.py set URL      send a URL directly
     python refresh.py status       ask what the display is currently showing
+    python refresh.py stop         stop the agent over there (it goes blank)
     python refresh.py pair         one-time setup, using the code on its screen
 
 This machine is the trusted side of the pair. If you later want the URL
@@ -228,6 +229,27 @@ def cmd_status(config: dict) -> int:
     return 0
 
 
+def cmd_stop(config: dict) -> int:
+    """
+    Stop the agent on the display laptop.
+
+    This is the only practical way to stop it. That machine runs a full-screen
+    kiosk whose watchdog relaunches Chrome a few seconds after anyone closes
+    it, and its keyboard is face-down and disabled -- so there is no way to get
+    at a prompt over there to stop it locally.
+
+    Chrome closes with the agent and stays closed. Starting it again has to
+    happen on the display itself, so only do this when you can get to it.
+    """
+    print("Stopping the agent on the display...")
+    call(config, "POST", "/shutdown", {})
+    print("\nStopped. The display is now blank and will stay that way.")
+    print("To start it again, on the display laptop run:")
+    print("  python display_agent.py run")
+    print("...or just reboot it -- the startup entry brings it back.")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Reload or repoint the Odoo customer display on the other machine.",
@@ -235,6 +257,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("init", help="write a starter config by hand (pair is easier)")
     sub.add_parser("status", help="ask what the display is currently showing")
+    sub.add_parser("stop", help="stop the agent on the display (it stays blank)")
     pair_parser = sub.add_parser(
         "pair", help="set up using the code shown on the display's screen"
     )
@@ -256,6 +279,8 @@ def main() -> int:
         return cmd_set(config, args.url)
     if args.command == "status":
         return cmd_status(config)
+    if args.command == "stop":
+        return cmd_stop(config)
     return cmd_refresh(config)
 
 

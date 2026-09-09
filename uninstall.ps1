@@ -84,6 +84,16 @@ $FirewallRuleName = 'Odoo Customer Display Agent'
 
 $IsAdmin = Test-Administrator
 
+# Elevation opens a separate window; without this an error would close it
+# before it could be read. See the same trap in install-agent.ps1.
+trap {
+    Write-Host "`n$('=' * 60)" -ForegroundColor Red
+    Write-Host "Uninstall failed:" -ForegroundColor Red
+    Write-Host "  $($_.Exception.Message)`n" -ForegroundColor Red
+    Wait-BeforeClosing -WhenElevated:$Elevated
+    exit 1
+}
+
 $done = [System.Collections.Generic.List[string]]::new()
 $skipped = [System.Collections.Generic.List[string]]::new()
 
@@ -248,6 +258,7 @@ if ($Purge) {
             @{ Path = $AgentConfig;                     Label = 'agent.config.json (holds the pairing code)' }
             @{ Path = $ClientConfig;                    Label = 'refresh.config.json (holds the pairing code)' }
             @{ Path = (Join-Path $Root 'agent.log');    Label = 'agent.log' }
+            @{ Path = (Join-Path $Root 'install.log');  Label = 'install.log' }
             @{ Path = (Join-Path $Root 'pairing.html'); Label = 'pairing.html' }
             @{ Path = (Join-Path $Root 'waiting.html'); Label = 'waiting.html' }
             @{ Path = $ProfileDir;                      Label = 'chrome-profile folder' }

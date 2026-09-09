@@ -4,6 +4,7 @@ refresh.config.json
 
 # Runtime junk.
 agent.log
+install.log
 pairing.html
 waiting.html
 chrome-profile/

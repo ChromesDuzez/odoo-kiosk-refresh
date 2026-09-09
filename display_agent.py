@@ -700,14 +700,19 @@ def make_handler(config: dict, chrome: ChromeSupervisor, request_shutdown=None):
                 return
 
             if self.path == "/shutdown" and self.command == "POST":
-                # Loopback only. Stopping the display is local maintenance, so
-                # even a correctly-signed request from elsewhere on the LAN is
-                # refused -- otherwise anyone holding the pairing code could
-                # black out the screen from across the shop.
-                if self.client_address[0] not in ("127.0.0.1", "::1"):
-                    self._send(403, {"error": "shutdown can only be requested from the display itself"})
-                    return
-                log("shutdown requested locally")
+                # Deliberately reachable from the POS computer, not just from
+                # loopback. The display is a full-screen kiosk whose watchdog
+                # relaunches Chrome within seconds, on a laptop with no usable
+                # keyboard -- so there is no practical way to run anything on
+                # the machine itself. A local-only stop would be a stop nobody
+                # could ever reach.
+                #
+                # The signature is what guards it, as with every other route.
+                # The worst a stop can do is blank the display until someone
+                # starts it again, which is both obvious and recoverable --
+                # unlike a repointed display, which is the thing the host
+                # allowlist exists to prevent.
+                log(f"shutdown requested by {self.client_address[0]}")
                 # Answer before stopping, or the caller sees a dropped
                 # connection rather than a confirmation.
                 self._send(200, {"ok": True, "stopping": True})
@@ -731,7 +736,15 @@ def cmd_run() -> int:
     if not config.get("allowed_hosts"):
         log("WARNING: allowed_hosts is empty -- reloads will work, but no new URL can be set")
 
-    chrome = ChromeSupervisor(config)
+    # Locating Chrome can fail (installed somewhere non-standard), and it
+    # happens before anything else. Log it: under pythonw.exe there is no
+    # console, so an unlogged exit here looks exactly like nothing happening.
+    try:
+        chrome = ChromeSupervisor(config)
+    except SystemExit as exc:
+        log(f"FATAL: {exc}")
+        raise
+
     host, port = config["listen_host"], int(config["listen_port"])
 
     # The server object is not built until after the handler needs to be able

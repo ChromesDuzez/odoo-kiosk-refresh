@@ -12,7 +12,9 @@ Two pieces, both stdlib-only Python — nothing to `pip install`, no venv:
 | `refresh.py` | POS computer | Sends it a reload, or a new URL |
 | `Refresh Display.cmd` | POS computer | Double-click wrapper around `refresh.py` |
 | `Change Display URL.cmd` | POS computer | Double-click wrapper that prompts for a paste |
+| `Stop Display Agent.cmd` | POS computer | Stops the display remotely; asks first |
 | `Pair With Display.cmd` | POS computer | One-time setup wrapper |
+| `Check Setup.cmd` | display laptop | Read-only: says why it isn't working |
 | `Stop Agent.cmd` | display laptop | Stops the agent (it has no window to close) |
 | `Install Agent.cmd` | display laptop | Autostart at logon + firewall rule |
 | `Uninstall.cmd` | either | Removes it again; run on both machines |
@@ -42,7 +44,27 @@ python refresh.py           reload
 python refresh.py set       prompt for a URL, then reload
 python refresh.py set URL   send a URL directly
 python refresh.py status    what is it showing right now?
+python refresh.py stop      stop it entirely; the screen goes blank
 ```
+
+## Getting out of kiosk mode
+
+Once the agent is running, the display is a full-screen Chrome window whose
+watchdog puts it back a few seconds after anyone closes it — and that laptop's
+keyboard is face-down and disabled. So closing Chrome over there achieves
+nothing, and there is no practical way to reach a prompt on the machine itself.
+
+To actually stop it, do it **from the POS computer**: double-click **Stop
+Display Agent** (it asks you to type `YES` first, since the screen stays blank
+afterwards), or run `python refresh.py stop`.
+
+Chrome closes with the agent and stays closed, which gives you the desktop over
+there to work on. To bring it back, on the display laptop run
+`python display_agent.py run` — or just reboot it, since the startup entry
+starts it again.
+
+If you *are* at the display with a working keyboard, **Stop Agent.cmd** does the
+same thing locally.
 
 ## Why it is built this way
 
@@ -57,6 +79,13 @@ Two controls protect the display:
   method, path, timestamp, nonce and body. A captured reload cannot be replayed
   as a repoint, and nothing can be replayed at all after 60 seconds. There are
   no unauthenticated endpoints at all, including during pairing.
+
+  `stop` is reachable from the POS computer rather than locked to the display
+  itself. That is deliberate: a kiosk with a relaunching watchdog and no usable
+  keyboard has no reachable local prompt, so a local-only stop would be one
+  nobody could ever use. It still needs the pairing code, and the worst it can
+  do — a blank screen until someone restarts it — is obvious and recoverable,
+  unlike a repointed display.
 - **A host allowlist.** A new URL must parse to a hostname you listed in
   `agent.config.json`. This is the control that actually matters: even if the
   shared secret leaked, the display can only ever be pointed at another page on
@@ -158,6 +187,27 @@ display to print the code again. To put it back on the screen instead, set
 `"paired": false` in `agent.config.json` and restart the agent.
 
 ## Troubleshooting
+
+**Start here: double-click "Check Setup".** It is read-only — it starts nothing
+and changes nothing — and it walks the whole chain in order: Python, the config,
+Chrome, the startup shortcut, whether the agent is running, what holds the port,
+the firewall rule, and the last dozen log lines. Anything it finds wrong comes
+with the fix. Most of what follows is only needed if you want the detail.
+
+**Nothing starts at logon.** Usually one of three things, all of which Check
+Setup names: there is no startup shortcut (the installer never finished), Python
+or `pythonw.exe` is not on PATH for that account, or **Chrome is not where the
+agent expects it**. That last one is worth knowing about — the agent looks Chrome
+up before it does anything else, so a Chrome installed somewhere non-standard
+stops it dead. Set `"chrome_path"` in `agent.config.json` to the full path to
+`chrome.exe`. The reason is now written to `agent.log` in every case.
+
+**A PowerShell window flashed open and vanished.** That was the elevated window
+(elevation always opens a second one) hitting an error. Every failure now pauses
+so you can read it, and every install writes `install.log` next to the scripts
+regardless. If you saw this on an older copy, the usual cause was a missing
+`agent.config.json` after an uninstall with `-Purge` — the installer now just
+creates one instead of failing.
 
 **I can't find the agent to stop it.** It runs under `pythonw.exe`, which has no
 window and no console, so closing the Chrome window does nothing to it — and a

@@ -81,6 +81,26 @@ $FirewallRuleName = 'Odoo Customer Display Agent'
 
 $IsAdmin = Test-Administrator
 
+# Elevation opens a SEPARATE window, so anything that ends this script without
+# pausing takes its own error message with it as the window closes. This trap
+# catches every terminating error -- including the `throw`s below -- and holds
+# the window open first. Without it, a failed check is invisible.
+trap {
+    Write-Host "`n$('=' * 60)" -ForegroundColor Red
+    Write-Host "Install failed:" -ForegroundColor Red
+    Write-Host "  $($_.Exception.Message)`n" -ForegroundColor Red
+    Write-Host "A copy of this output is in:" -ForegroundColor DarkGray
+    Write-Host "  $TranscriptPath" -ForegroundColor DarkGray
+    try { Stop-Transcript | Out-Null } catch { }
+    Wait-BeforeClosing -WhenElevated:$Elevated
+    exit 1
+}
+
+# A written record too, since a window that closes cannot be read at all and
+# this machine is awkward to type on.
+$TranscriptPath = Join-Path $Root 'install.log'
+try { Start-Transcript -Path $TranscriptPath -Force | Out-Null } catch { }
+
 # If elevation landed us in a different account, the Startup path we were
 # handed is still the right one -- but say so, because "installed for a user
 # who is not you" is surprising enough to be worth stating out loud.
@@ -93,16 +113,29 @@ if ($Elevated -and $StartupDir -ne [Environment]::GetFolderPath('Startup')) {
 # ------------------------------------------------------------ sanity checks
 
 if (-not (Test-Path $Agent)) {
-    Write-Host "display_agent.py not found next to this script." -ForegroundColor Red
-    Write-Host "  expected: $Agent"
-    exit 1
+    throw "display_agent.py is not next to this script.`n  expected: $Agent"
 }
 
+# Uninstalling with -Purge deletes the config, so a reinstall lands here with
+# nothing to read. Rather than failing and sending you off to run another
+# command, make one. The agent's own screens explain what still needs filling
+# in, so there is no value in stopping here.
 if (-not (Test-Path $Config)) {
-    Write-Host "agent.config.json does not exist yet." -ForegroundColor Red
-    Write-Host "Run this first, then edit the file it writes:" -ForegroundColor Yellow
-    Write-Host "  python display_agent.py init"
-    exit 1
+    Write-Host "No agent.config.json found -- creating one now." -ForegroundColor Cyan
+
+    if (Get-Command py.exe -ErrorAction SilentlyContinue) {
+        & py.exe -3 $Agent init
+    }
+    else {
+        & python.exe $Agent init
+    }
+
+    if (-not (Test-Path $Config)) {
+        throw ("Could not create agent.config.json.`n" +
+               "Run this by hand and see what it says:`n" +
+               "  python display_agent.py init")
+    }
+    Write-Host ''
 }
 
 # Catch the two blanks that produce a confusing failure much later: an agent
@@ -111,14 +144,13 @@ try {
     $parsed = Get-Content $Config -Raw | ConvertFrom-Json
 }
 catch {
-    Write-Host "agent.config.json is not valid JSON: $($_.Exception.Message)" -ForegroundColor Red
-    exit 1
+    throw ("agent.config.json is not valid JSON:`n  $($_.Exception.Message)`n" +
+           "Fix it, or delete it and re-run this to have a fresh one written.")
 }
 
 if (-not $parsed.shared_secret) {
-    Write-Host "No pairing code in agent.config.json." -ForegroundColor Red
-    Write-Host "Run:  python display_agent.py init" -ForegroundColor Yellow
-    exit 1
+    throw ("agent.config.json has no pairing code in it.`n" +
+           "Delete the file and re-run this, or run:  python display_agent.py init")
 }
 if (-not $parsed.url) {
     Write-Host "No url set yet -- that is fine before pairing, the display will show" -ForegroundColor Yellow
@@ -148,9 +180,9 @@ if (-not $PythonW) {
     }
 }
 if (-not $PythonW) {
-    Write-Host "Could not find pythonw.exe." -ForegroundColor Red
-    Write-Host "Make sure Python is installed and on PATH." -ForegroundColor Yellow
-    exit 1
+    throw ("Could not find pythonw.exe.`n" +
+           "Python must be installed and on PATH for the account this runs as.`n" +
+           "Check with:  py -3 -c `"import sys; print(sys.executable)`"")
 }
 
 Write-Host "Using: $PythonW" -ForegroundColor DarkGray
@@ -208,5 +240,9 @@ if (-not $parsed.paired) {
     Write-Host "address. Go to the POS computer, run 'Pair With Display', and type" -ForegroundColor Cyan
     Write-Host "in what you see. You are done on this machine after that." -ForegroundColor Cyan
 }
+
+Write-Host "`nA record of this install is in:" -ForegroundColor DarkGray
+Write-Host "  $TranscriptPath" -ForegroundColor DarkGray
+try { Stop-Transcript | Out-Null } catch { }
 
 Wait-BeforeClosing -WhenElevated:$Elevated
