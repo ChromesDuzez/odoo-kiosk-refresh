@@ -1,0 +1,9 @@
+# These hold the shared secret -- never commit them.
+agent.config.json
+refresh.config.json
+
+# Runtime junk.
+agent.log
+chrome-profile/
+__pycache__/
+*.pyc
