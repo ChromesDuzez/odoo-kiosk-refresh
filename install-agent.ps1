@@ -25,20 +25,19 @@
     Which addresses may reach the port. Defaults to LocalSubnet, which is the
     right answer unless the POS computer is on a different subnet.
 
-.PARAMETER Uninstall
-    Remove the startup shortcut and the firewall rule.
+.NOTES
+    To undo all of this, use uninstall.ps1 -- it also stops the running agent
+    and closes the kiosk Chrome window, which this script does not do.
 
 .EXAMPLE
     .\install-agent.ps1
     .\install-agent.ps1 -Port 9000 -RemoteAddress 192.168.1.50
-    .\install-agent.ps1 -Uninstall
 #>
 
 [CmdletBinding()]
 param(
     [int]$Port = 8765,
-    [string]$RemoteAddress = 'LocalSubnet',
-    [switch]$Uninstall
+    [string]$RemoteAddress = 'LocalSubnet'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -53,32 +52,6 @@ $FirewallRuleName = 'Odoo Customer Display Agent'
 $IsAdmin = ([Security.Principal.WindowsPrincipal] `
         [Security.Principal.WindowsIdentity]::GetCurrent()
 ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-
-# ---------------------------------------------------------------- uninstall
-
-if ($Uninstall) {
-    if (Test-Path $ShortcutPath) {
-        Remove-Item $ShortcutPath -Force
-        Write-Host "Removed startup shortcut." -ForegroundColor Green
-    }
-    else {
-        Write-Host "No startup shortcut found."
-    }
-
-    if ($IsAdmin) {
-        $existing = Get-NetFirewallRule -DisplayName $FirewallRuleName -ErrorAction SilentlyContinue
-        if ($existing) {
-            $existing | Remove-NetFirewallRule
-            Write-Host "Removed firewall rule." -ForegroundColor Green
-        }
-    }
-    else {
-        Write-Host "Not elevated -- left the firewall rule in place." -ForegroundColor Yellow
-    }
-
-    Write-Host "`nThe agent will not start at next logon. Stop the running one from Task Manager (pythonw.exe)."
-    exit 0
-}
 
 # ------------------------------------------------------------ sanity checks
 
@@ -106,11 +79,13 @@ catch {
 }
 
 if (-not $parsed.shared_secret) {
-    Write-Host "shared_secret is empty in agent.config.json." -ForegroundColor Red
+    Write-Host "No pairing code in agent.config.json." -ForegroundColor Red
+    Write-Host "Run:  python display_agent.py init" -ForegroundColor Yellow
     exit 1
 }
 if (-not $parsed.url) {
-    Write-Host "url is empty in agent.config.json -- Chrome will start with nothing to show." -ForegroundColor Yellow
+    Write-Host "No url set yet -- that is fine before pairing, the display will show" -ForegroundColor Yellow
+    Write-Host "the pairing code. Send a URL afterwards from the POS computer." -ForegroundColor Yellow
 }
 if ($parsed.listen_port -and [int]$parsed.listen_port -ne $Port) {
     Write-Host "Config says port $($parsed.listen_port) but -Port is $Port." -ForegroundColor Yellow
@@ -182,10 +157,16 @@ else {
 
 # -------------------------------------------------------------------- finish
 
-Write-Host "`nThis laptop's addresses (use one as agent_host on the POS computer):" -ForegroundColor Cyan
+Write-Host "`nThis laptop's addresses:" -ForegroundColor Cyan
 Get-NetIPAddress -AddressFamily IPv4 |
     Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
     ForEach-Object { Write-Host "  $($_.IPAddress)  ($($_.InterfaceAlias))" }
 
 Write-Host "`nStart it now without rebooting:" -ForegroundColor Cyan
 Write-Host "  Start-Process '$PythonW' -ArgumentList '`"$Agent`" run' -WorkingDirectory '$Root'"
+
+if (-not $parsed.paired) {
+    Write-Host "`nOnce it starts, this screen will show a pairing code and its own" -ForegroundColor Cyan
+    Write-Host "address. Go to the POS computer, run 'Pair With Display', and type" -ForegroundColor Cyan
+    Write-Host "in what you see. You are done on this machine after that." -ForegroundColor Cyan
+}

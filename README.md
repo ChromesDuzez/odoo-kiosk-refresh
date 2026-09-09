@@ -12,7 +12,9 @@ Two pieces, both stdlib-only Python — nothing to `pip install`, no venv:
 | `refresh.py` | POS computer | Sends it a reload, or a new URL |
 | `Refresh Display.cmd` | POS computer | Double-click wrapper around `refresh.py` |
 | `Change Display URL.cmd` | POS computer | Double-click wrapper that prompts for a paste |
+| `Pair With Display.cmd` | POS computer | One-time setup wrapper |
 | `install-agent.ps1` | display laptop | Autostart at logon + firewall rule |
+| `uninstall.ps1` | either | Removes it again; run on both machines |
 
 Copy this whole folder to both machines. Each one uses its own half plus the
 shared `wire.py`.
@@ -47,7 +49,8 @@ Two controls protect the display:
 
 - **Signed requests.** Every request carries an HMAC-SHA256 signature over the
   method, path, timestamp, nonce and body. A captured reload cannot be replayed
-  as a repoint, and nothing can be replayed at all after 60 seconds.
+  as a repoint, and nothing can be replayed at all after 60 seconds. There are
+  no unauthenticated endpoints at all, including during pairing.
 - **A host allowlist.** A new URL must parse to a hostname you listed in
   `agent.config.json`. This is the control that actually matters: even if the
   shared secret leaked, the display can only ever be pointed at another page on
@@ -59,7 +62,17 @@ is what provides authenticity, and the allowlist bounds the damage — but it do
 mean anyone sniffing the LAN can see which URL you sent. The display token in
 that URL is read-only, so this is a deliberate trade rather than an oversight.
 
+The pairing code itself never crosses the network, in either direction. It moves
+between the machines only by being read off a screen, so there is no window
+during setup in which sniffing the LAN would reveal it.
+
 ## Setup
+
+Nothing long has to be copied from the display laptop, because there is nothing
+long to copy. The shared secret **is** a twelve-character pairing code, and the
+display shows it on its own screen in large type along with its IP address. You
+read those off the screen and type them on the POS computer, which has a
+keyboard. That is the entire cross-machine transfer.
 
 ### 1. Display laptop
 
@@ -71,13 +84,13 @@ cd <this folder>
 python display_agent.py init
 ```
 
-That writes `agent.config.json` and prints a shared secret. **Copy the secret**,
-you need it in step 2. Then edit the config:
+That writes `agent.config.json` with a fresh pairing code already in it. Edit
+the config to fill in the rest:
 
 ```jsonc
 {
   "listen_port": 8765,
-  "shared_secret": "...",                      // already filled in
+  "shared_secret": "K7MQ3XRT9PBW",             // already filled in, leave it
   "url": "https://yourcompany.odoo.com/...",   // the display URL from Odoo
   "allowed_hosts": ["yourcompany.odoo.com"],   // required, or no URL can be set
   "allowed_clients": ["192.168.1.50"],         // optional: only the POS computer
@@ -90,7 +103,8 @@ you need it in step 2. Then edit the config:
 attempt a request. Leave it `[]` to accept any address on the network.
 
 To get `url`: in Odoo, **Point of Sale → Configuration → your POS →
-Customer Display**. It is the same URL you originally set the kiosk up with.
+Customer Display**. It is the same URL you originally set the kiosk up with. You
+can also leave it blank and send it from the POS computer after pairing.
 
 Then install it to start automatically. Run this **as Administrator** so it can
 also open the firewall — without that rule, Windows silently drops the requests
@@ -100,36 +114,33 @@ and the POS computer just sees a timeout:
 .\install-agent.ps1
 ```
 
-It prints the laptop's IP addresses at the end. Note the LAN one.
-
-Log out and back in, or start it now with the command it prints. Chrome should
-come up in kiosk mode on its own.
+Log out and back in, or start it now with the command it prints. The screen will
+come up showing **its address and a pairing code**. Leave it there and walk to
+the other machine — you are finished on this one.
 
 ### 2. POS computer
 
+Double-click **Pair With Display**, or:
+
 ```powershell
 cd <this folder>
-python refresh.py init
+python refresh.py pair
 ```
 
-Edit `refresh.config.json`:
+It asks for the address and then the code, both of which are on the display in
+front of you. Dashes, spacing and capitalisation do not matter, and `O`/`0` and
+`I`/`1` are treated as the same character, so there is nothing to get wrong by
+misreading the screen.
 
-```jsonc
-{
-  "agent_host": "192.168.1.51",   // the display laptop's IP
-  "agent_port": 8765,             // must match listen_port
-  "shared_secret": "..."          // paste the secret from step 1
-}
-```
+When it succeeds, the display drops the pairing screen by itself and goes back
+to the customer view. Put shortcuts to the three `.cmd` files on the desktop for
+the counter staff, and you are done.
 
-Check it:
+### Re-pairing later
 
-```powershell
-python refresh.py status
-```
-
-If that reports the URL, you are done. Put shortcuts to the two `.cmd` files on
-the desktop for the counter staff.
+If the POS computer is replaced, run `python display_agent.py show-code` on the
+display to print the code again. To put it back on the screen instead, set
+`"paired": false` in `agent.config.json` and restart the agent.
 
 ## Troubleshooting
 
@@ -138,7 +149,9 @@ the agent is not running, or the firewall rule is missing. Confirm the agent is
 alive: Task Manager on the laptop should show `pythonw.exe`. Check
 `agent.log` next to `display_agent.py` for what it has been doing.
 
-**"signature mismatch"** — the two `shared_secret` values differ. Copy it again.
+**"signature mismatch"** or **"The display rejected that code"** — the pairing
+code does not match. Run `python display_agent.py show-code` on the display to
+check it, then `python refresh.py pair` again.
 
 **"timestamp outside the accepted window"** — the machines' clocks disagree by
 more than a minute. Fix the clock on whichever one has drifted.
@@ -155,6 +168,41 @@ should suppress it. If a Chrome update reintroduces it, delete the
 **The display went blank on its own** — the agent watches Chrome and relaunches
 it within a few seconds if it exits. Set `restart_if_chrome_exits` to `false` if
 you ever need to stop that while debugging.
+
+## Uninstalling
+
+```powershell
+.\uninstall.ps1
+```
+
+Safe on either machine and safe to run twice — it works out which half is
+installed from the config files present, reports what it finds, and skips what
+is not there. Run it as Administrator so it can also remove the firewall rule;
+without elevation it cannot even see whether that rule exists, and says so
+rather than claiming it is gone.
+
+It stops the running agent, closes the kiosk Chrome window, removes the Startup
+shortcut and removes the firewall rule. **Your settings are kept**, so
+re-running `install-agent.ps1` later brings everything back with the same
+pairing code and no need to pair again.
+
+```powershell
+.\uninstall.ps1 -WhatIf     # show what it would do, change nothing
+.\uninstall.ps1 -Purge      # also delete settings, logs and the Chrome profile
+```
+
+`-Purge` destroys the pairing code, so both machines would have to be paired
+again from scratch. It lists what it is about to delete and makes you type
+`YES` first, unless you add `-Force`.
+
+The one thing worth knowing: it only ever closes the kiosk Chrome, never an
+ordinary browser window. The kiosk runs in a dedicated profile directory, and
+the script matches on that path — so the staff member's own Chrome tabs on the
+POS computer are not touched. If it cannot determine the profile path for any
+reason, it skips closing Chrome entirely rather than guessing.
+
+Afterwards the scripts themselves are still on disk. Delete the folder to
+finish.
 
 ## Changing it later
 

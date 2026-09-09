@@ -1,2 +1,7 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# These are run by cmd.exe and PowerShell on Windows, so they must keep CRLF
+# on checkout regardless of the platform the repo is cloned to.
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

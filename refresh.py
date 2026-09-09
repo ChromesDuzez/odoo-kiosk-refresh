@@ -6,7 +6,7 @@ Customer display remote -- runs on the POS computer.
     python refresh.py set          paste in a new URL, then reload
     python refresh.py set URL      send a URL directly
     python refresh.py status       ask what the display is currently showing
-    python refresh.py init         write a starter config
+    python refresh.py pair         one-time setup, using the code on its screen
 
 This machine is the trusted side of the pair. If you later want the URL
 fetched from Odoo automatically rather than pasted, that belongs here -- the
@@ -40,8 +40,9 @@ DEFAULT_CONFIG = {
 def load_config() -> dict:
     if not CONFIG_PATH.exists():
         raise SystemExit(
-            f"No config at {CONFIG_PATH}\n"
-            f"Run:  python {Path(__file__).name} init"
+            "This computer is not paired with the display yet.\n"
+            f"Run:  python {Path(__file__).name} pair\n"
+            "The display is showing the address and code you will need."
         )
     with CONFIG_PATH.open(encoding="utf-8") as handle:
         config = json.load(handle)
@@ -49,8 +50,8 @@ def load_config() -> dict:
     merged.update(config)
     if not merged.get("shared_secret"):
         raise SystemExit(
-            f'shared_secret is empty in {CONFIG_PATH}\n'
-            "Paste in the secret that display_agent.py printed when you ran its init."
+            f"No pairing code saved in {CONFIG_PATH}\n"
+            f"Run:  python {Path(__file__).name} pair"
         )
     return merged
 
@@ -65,7 +66,96 @@ def cmd_init() -> int:
     print(f"Wrote {CONFIG_PATH}\n")
     print("Now edit it and fill in:")
     print('  "agent_host"     the display laptop\'s IP address on the LAN')
-    print('  "shared_secret"  the secret display_agent.py printed during its init')
+    print('  "shared_secret"  the pairing code, without the dashes')
+    print("\nUsually easier:  python refresh.py pair")
+    return 0
+
+
+def split_address(text: str) -> tuple[str, int | None]:
+    """Accept '192.168.1.51' or '192.168.1.51:8765', as shown on the display."""
+    text = text.strip()
+    if ":" in text:
+        host, _, port = text.rpartition(":")
+        try:
+            return host.strip(), int(port)
+        except ValueError:
+            raise ValueError(f"{port!r} is not a port number") from None
+    return text, None
+
+
+def cmd_pair(host: str | None) -> int:
+    """
+    Pair with the display by reading the code off its screen.
+
+    Nothing is transmitted to set this up and there is no pairing endpoint on
+    the agent: the code already *is* the shared secret, so simply making one
+    correctly-signed request proves we have it. That request is the /status
+    call at the end here, which is also what takes the code off the display.
+    """
+    port = None
+    if host:
+        host, port = split_address(host)
+    else:
+        print("The display is showing its address and a pairing code.\n")
+        try:
+            host, port = split_address(input("Display address (e.g. 192.168.1.51): "))
+        except ValueError as exc:
+            print(f"\n{exc}", file=sys.stderr)
+            return 1
+        except (EOFError, KeyboardInterrupt):
+            print("\nCancelled.")
+            return 1
+
+    if not host:
+        print("No address given.", file=sys.stderr)
+        return 1
+
+    try:
+        raw = input("Pairing code (e.g. K7MQ-3XRT-9PBW): ")
+    except (EOFError, KeyboardInterrupt):
+        print("\nCancelled.")
+        return 1
+
+    try:
+        secret = wire.parse_pairing_code(raw)
+    except ValueError as exc:
+        print(f"\nThat is not a valid pairing code -- {exc}", file=sys.stderr)
+        return 1
+
+    config = dict(DEFAULT_CONFIG)
+    if CONFIG_PATH.exists():
+        with CONFIG_PATH.open(encoding="utf-8") as handle:
+            config.update(json.load(handle))
+    config["agent_host"] = host
+    config["agent_port"] = port or config.get("agent_port") or 8765
+    config["shared_secret"] = secret
+
+    print(f"\nChecking {config['agent_host']}:{config['agent_port']}...")
+    try:
+        result = call(config, "GET", "/status")
+    except SystemExit as exc:
+        message = str(exc)
+        if "401" in message:
+            print(
+                "\nThe display rejected that code.\n"
+                "Check it against the screen -- it is 12 characters in three groups.",
+                file=sys.stderr,
+            )
+        else:
+            print(f"\n{message}", file=sys.stderr)
+        print("\nNothing was saved.", file=sys.stderr)
+        return 1
+
+    with CONFIG_PATH.open("w", encoding="utf-8") as handle:
+        json.dump(config, handle, indent=2)
+        handle.write("\n")
+
+    print(f"Paired. Saved to {CONFIG_PATH}\n")
+    show(result)
+    if result.get("newly_paired"):
+        print("\nThe display is switching back to the customer view now.")
+    if not result.get("url"):
+        print('\nNo URL is set on the display yet. Send one with:  python refresh.py set')
     return 0
 
 
@@ -143,8 +233,14 @@ def main() -> int:
         description="Reload or repoint the Odoo customer display on the other machine.",
     )
     sub = parser.add_subparsers(dest="command")
-    sub.add_parser("init", help="write a starter config")
+    sub.add_parser("init", help="write a starter config by hand (pair is easier)")
     sub.add_parser("status", help="ask what the display is currently showing")
+    pair_parser = sub.add_parser(
+        "pair", help="set up using the code shown on the display's screen"
+    )
+    pair_parser.add_argument(
+        "host", nargs="?", help="the display's address; omit to be prompted"
+    )
     set_parser = sub.add_parser("set", help="send a new URL (prompts if you omit it)")
     set_parser.add_argument("url", nargs="?", help="the URL; omit to be prompted for a paste")
 
@@ -152,6 +248,8 @@ def main() -> int:
 
     if args.command == "init":
         return cmd_init()
+    if args.command == "pair":
+        return cmd_pair(args.host)
 
     config = load_config()
     if args.command == "set":
