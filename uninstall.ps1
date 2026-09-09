@@ -30,31 +30,59 @@
 .PARAMETER Force
     Skip the -Purge confirmation prompt.
 
+.PARAMETER NoElevate
+    Do not ask for Administrator rights. The firewall rule is then left in
+    place and reported, and an agent running as another user cannot be stopped.
+
+.NOTES
+    Easiest way to run this is to double-click "Uninstall.cmd", which launches
+    PowerShell with -ExecutionPolicy Bypass for that process only.
+
 .EXAMPLE
     .\uninstall.ps1
     .\uninstall.ps1 -WhatIf          # show what would happen, change nothing
     .\uninstall.ps1 -Purge           # also delete settings and the pairing code
+    .\uninstall.ps1 -NoElevate       # no UAC prompt; skips what needs rights
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
     [switch]$Purge,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$NoElevate,
+
+    # Set automatically on the elevated relaunch; see install-agent.ps1 and
+    # lib-elevate.ps1 for why the Startup path has to be carried across.
+    # Do not pass these by hand.
+    [switch]$Elevated,
+    [string]$StartupDir
 )
 
 $ErrorActionPreference = 'Stop'
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $Root 'lib-elevate.ps1')
+
+# Resolved before elevating, so the shortcut removed is the signed-in user's
+# and not that of whichever admin account approved the UAC prompt.
+if (-not $StartupDir) { $StartupDir = [Environment]::GetFolderPath('Startup') }
+
+$forward = @{} + $PSBoundParameters
+$forward.Remove('Elevated') | Out-Null
+$forward['StartupDir'] = $StartupDir
+
+Assert-Elevated -ScriptPath $MyInvocation.MyCommand.Path `
+    -BoundParameters $forward `
+    -AlreadyElevated:$Elevated `
+    -NoElevate:$NoElevate
+
 $Agent = Join-Path $Root 'display_agent.py'
 $AgentConfig = Join-Path $Root 'agent.config.json'
 $ClientConfig = Join-Path $Root 'refresh.config.json'
-$StartupDir = [Environment]::GetFolderPath('Startup')
 $ShortcutPath = Join-Path $StartupDir 'Odoo Customer Display Agent.lnk'
 $FirewallRuleName = 'Odoo Customer Display Agent'
 
-$IsAdmin = ([Security.Principal.WindowsPrincipal] `
-        [Security.Principal.WindowsIdentity]::GetCurrent()
-).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$IsAdmin = Test-Administrator
 
 $done = [System.Collections.Generic.List[string]]::new()
 $skipped = [System.Collections.Generic.List[string]]::new()
@@ -198,9 +226,10 @@ if ($rule) {
     Write-Removed 'firewall rule'
 }
 elseif (-not $IsAdmin) {
-    # Without elevation we cannot even see whether the rule exists, so this is
-    # reported as unknown rather than absent.
-    Write-Host "  unknown  firewall rule (needs Administrator to check or remove)" -ForegroundColor Yellow
+    # Reached only under -NoElevate, or if elevation was declined. Without
+    # rights we cannot even see whether the rule exists, so it is reported as
+    # unknown rather than claimed absent.
+    Write-Host "  unknown  firewall rule (re-run without -NoElevate to remove it)" -ForegroundColor Yellow
     $skipped.Add('firewall rule (not checked)')
 }
 else {
@@ -282,3 +311,5 @@ if ($hasClient -and -not $hasAgent) {
 
 Write-Host "`nThe scripts themselves are still here. Delete the folder to finish:" -ForegroundColor DarkGray
 Write-Host "  $Root`n" -ForegroundColor DarkGray
+
+Wait-BeforeClosing -WhenElevated:$Elevated

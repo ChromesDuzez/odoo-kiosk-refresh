@@ -164,7 +164,8 @@ def cmd_init() -> int:
     print("Now edit it and fill in:")
     print('  "url"            the customer display URL from Odoo')
     print('  "allowed_hosts"  e.g. ["yourcompany.odoo.com"] -- the display can')
-    print("                   only ever be pointed at a host in this list")
+    print("                   only ever be pointed at a host in this list.")
+    print('                   Use ["*"] to allow any host at all.')
     print("\nThen start the agent. It will show this pairing code on the screen,")
     print("so you do not have to copy anything off this machine by hand:\n")
     print(f"  {wire.format_pairing_code(config['shared_secret'])}\n")
@@ -225,28 +226,43 @@ def write_pairing_page(config: dict) -> str:
     address = local_ip()
     port = config.get("listen_port", 8765)
 
+    # Sizing notes, since this has to fit any screen without a scrollbar:
+    #
+    #  * border-box everywhere, so the body's padding counts inside its 100%
+    #    height rather than adding to it -- that overflow is what put a scroll
+    #    bar on the page in the first place.
+    #  * the code scales on min(vw, vh) so it shrinks for a short screen as
+    #    well as a narrow one. The vw figure is bounded by the code's own
+    #    width: 14 characters at roughly 0.6em each, plus letter-spacing and
+    #    padding, comes to about 10.3em, so 8.5vw keeps it inside the viewport
+    #    with room to spare.
+    #  * overflow: hidden is the backstop, so an unexpected font metric can
+    #    never reintroduce a scrollbar.
     html = f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Pairing</title><style>
-  html, body {{ height: 100%; margin: 0; }}
+  *, *::before, *::after {{ box-sizing: border-box; }}
+  html, body {{ height: 100%; margin: 0; overflow: hidden; }}
   body {{
     background: #12161c; color: #e8edf4; display: flex; flex-direction: column;
     align-items: center; justify-content: center; text-align: center;
-    font-family: "Segoe UI", system-ui, sans-serif; padding: 4vh 4vw;
+    font-family: "Segoe UI", system-ui, sans-serif; padding: 3vh 3vw; gap: 0;
   }}
-  h1 {{ font-size: clamp(20px, 3.2vw, 40px); font-weight: 600; margin: 0 0 0.4em; }}
-  p  {{ font-size: clamp(14px, 1.6vw, 22px); color: #9aa7b8; margin: 0 0 2.2em;
-        max-width: 26em; line-height: 1.5; }}
-  .label {{ font-size: clamp(11px, 1.1vw, 15px); letter-spacing: .18em;
-            text-transform: uppercase; color: #7c8ba0; margin-bottom: .7em; }}
+  h1 {{ font-size: min(3.2vw, 5vh); font-weight: 600; margin: 0 0 .5em;
+        line-height: 1.2; }}
+  p  {{ font-size: min(1.7vw, 2.6vh); color: #9aa7b8; margin: 0 0 4vh;
+        max-width: 32em; line-height: 1.5; }}
+  .label {{ font-size: min(1.2vw, 1.9vh); letter-spacing: .18em;
+            text-transform: uppercase; color: #7c8ba0; margin-bottom: .8em; }}
   .code {{
     font-family: Consolas, "SF Mono", monospace; font-weight: 700;
-    font-size: clamp(38px, 8.5vw, 128px); letter-spacing: .06em;
-    color: #7fd4ff; background: #1b2330; border-radius: 16px;
-    padding: .35em .55em; margin-bottom: 1.1em; white-space: nowrap;
+    font-size: min(8.5vw, 13vh); letter-spacing: .06em; line-height: 1.1;
+    color: #7fd4ff; background: #1b2330; border-radius: .12em;
+    padding: .3em .45em; margin-bottom: 4vh; white-space: nowrap;
+    max-width: 100%;
   }}
   .addr {{ font-family: Consolas, "SF Mono", monospace;
-           font-size: clamp(18px, 2.6vw, 38px); color: #e8edf4; }}
-  footer {{ margin-top: 2.6em; font-size: clamp(12px, 1.3vw, 18px); color: #6b7a8d; }}
+           font-size: min(2.8vw, 4.2vh); color: #e8edf4; white-space: nowrap; }}
+  footer {{ margin-top: 4vh; font-size: min(1.4vw, 2.1vh); color: #6b7a8d; }}
 </style></head><body>
   <h1>Customer display &mdash; not paired yet</h1>
   <p>On the POS computer, run <strong>Pair With Display</strong> and enter these.</p>
@@ -290,12 +306,15 @@ def validate_url(url: str, config: dict) -> str:
 
     scheme = parsed.scheme.lower()
     allowed_schemes = [s.lower() for s in config.get("allowed_schemes") or ["https"]]
-    if scheme not in allowed_schemes:
+    if "*" not in allowed_schemes and scheme not in allowed_schemes:
         raise UrlRejected(f"scheme {scheme!r} is not one of {allowed_schemes}")
 
     if parsed.username or parsed.password:
         raise UrlRejected("URLs carrying credentials are not accepted")
 
+    # Required even under a wildcard host: it keeps schemes with no host part,
+    # file:// above all, from turning a remote request into "show me whatever
+    # is on this laptop's disk".
     host = (parsed.hostname or "").lower()
     if not host:
         raise UrlRejected("URL has no hostname")
@@ -305,7 +324,12 @@ def validate_url(url: str, config: dict) -> str:
         raise UrlRejected(
             "allowed_hosts is empty in agent.config.json, so no URL can be accepted"
         )
-    if host not in allowed_hosts:
+
+    # "*" turns the allowlist off: any host goes. Worth knowing what that
+    # costs -- the allowlist is what keeps a leaked pairing code from being
+    # able to put an arbitrary page in front of customers, so with it off the
+    # code becomes the only thing standing there.
+    if "*" not in allowed_hosts and host not in allowed_hosts:
         raise UrlRejected(f"host {host!r} is not one of {allowed_hosts}")
 
     return url

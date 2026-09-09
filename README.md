@@ -13,8 +13,13 @@ Two pieces, both stdlib-only Python — nothing to `pip install`, no venv:
 | `Refresh Display.cmd` | POS computer | Double-click wrapper around `refresh.py` |
 | `Change Display URL.cmd` | POS computer | Double-click wrapper that prompts for a paste |
 | `Pair With Display.cmd` | POS computer | One-time setup wrapper |
-| `install-agent.ps1` | display laptop | Autostart at logon + firewall rule |
-| `uninstall.ps1` | either | Removes it again; run on both machines |
+| `Install Agent.cmd` | display laptop | Autostart at logon + firewall rule |
+| `Uninstall.cmd` | either | Removes it again; run on both machines |
+
+The `.cmd` files are the intended way in — they are double-clickable and deal
+with the execution policy for you. Each wraps the `.ps1` of the same name
+(`install-agent.ps1`, `uninstall.ps1`), which you can also call directly from a
+PowerShell prompt. `lib-elevate.ps1` is shared plumbing, not run on its own.
 
 Copy this whole folder to both machines. Each one uses its own half plus the
 shared `wire.py`.
@@ -57,6 +62,12 @@ Two controls protect the display:
   your own Odoo server — never at an attacker's page. The check compares the
   *parsed* hostname exactly, so `yourcompany.odoo.com.evil.net` is rejected.
 
+  Set `"allowed_hosts": ["*"]` to turn this off and allow any host — handy for
+  putting something else on the screen for a laugh. Just know what it costs:
+  the allowlist is the layer that limits the damage of a leaked pairing code,
+  so with it off, the code is the only thing standing between the LAN and
+  whatever appears in front of customers. Easy to flip back.
+
 The traffic is plain HTTP on your LAN. That is fine here because the signature
 is what provides authenticity, and the allowlist bounds the damage — but it does
 mean anyone sniffing the LAN can see which URL you sent. The display token in
@@ -92,7 +103,7 @@ the config to fill in the rest:
   "listen_port": 8765,
   "shared_secret": "K7MQ3XRT9PBW",             // already filled in, leave it
   "url": "https://yourcompany.odoo.com/...",   // the display URL from Odoo
-  "allowed_hosts": ["yourcompany.odoo.com"],   // required, or no URL can be set
+  "allowed_hosts": ["yourcompany.odoo.com"],   // required; ["*"] allows any host
   "allowed_clients": ["192.168.1.50"],         // optional: only the POS computer
   "chrome_path": "auto",
   "restart_if_chrome_exits": true
@@ -106,12 +117,15 @@ To get `url`: in Odoo, **Point of Sale → Configuration → your POS →
 Customer Display**. It is the same URL you originally set the kiosk up with. You
 can also leave it blank and send it from the POS computer after pairing.
 
-Then install it to start automatically. Run this **as Administrator** so it can
-also open the firewall — without that rule, Windows silently drops the requests
-and the POS computer just sees a timeout:
+Then install it to start automatically by double-clicking **Install Agent.cmd**.
+It asks for Administrator rights itself — accept the UAC prompt, because the
+firewall rule needs them and without it Windows silently drops the requests and
+the POS computer just sees a timeout.
+
+From a PowerShell prompt instead, if you prefer:
 
 ```powershell
-.\install-agent.ps1
+powershell -ExecutionPolicy Bypass -File .\install-agent.ps1
 ```
 
 Log out and back in, or start it now with the command it prints. The screen will
@@ -171,24 +185,22 @@ you ever need to stop that while debugging.
 
 ## Uninstalling
 
-```powershell
-.\uninstall.ps1
-```
+Double-click **Uninstall.cmd**, and accept the UAC prompt.
 
 Safe on either machine and safe to run twice — it works out which half is
 installed from the config files present, reports what it finds, and skips what
-is not there. Run it as Administrator so it can also remove the firewall rule;
-without elevation it cannot even see whether that rule exists, and says so
-rather than claiming it is gone.
+is not there. If you decline elevation it carries on without it, but cannot
+remove the firewall rule and says so rather than claiming it is gone.
 
 It stops the running agent, closes the kiosk Chrome window, removes the Startup
 shortcut and removes the firewall rule. **Your settings are kept**, so
-re-running `install-agent.ps1` later brings everything back with the same
-pairing code and no need to pair again.
+re-running the installer later brings everything back with the same pairing code
+and no need to pair again.
 
-```powershell
-.\uninstall.ps1 -WhatIf     # show what it would do, change nothing
-.\uninstall.ps1 -Purge      # also delete settings, logs and the Chrome profile
+```
+Uninstall.cmd -WhatIf     rem show what it would do, change nothing
+Uninstall.cmd -Purge      rem also delete settings, logs and the Chrome profile
+Uninstall.cmd -NoElevate  rem no UAC prompt; skips whatever needs rights
 ```
 
 `-Purge` destroys the pairing code, so both machines would have to be paired
@@ -203,6 +215,45 @@ reason, it skips closing Chrome entirely rather than guessing.
 
 Afterwards the scripts themselves are still on disk. Delete the folder to
 finish.
+
+## Execution policy and elevation
+
+You never need to run `Set-ExecutionPolicy`, and nothing here changes the
+machine's policy.
+
+The `.cmd` launchers start PowerShell like this:
+
+```
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "...\install-agent.ps1"
+```
+
+`-ExecutionPolicy` **on the command line applies to that one process**. It is
+the launch-argument form of `Set-ExecutionPolicy -Scope Process -ExecutionPolicy
+Bypass` — same scope, same lifetime, except you do not have to type it first and
+there is no window in which a policy is loosened for anything else. The registry
+is untouched, `Get-ExecutionPolicy -List` is unchanged, and the machine-wide and
+user-wide policies stay exactly as your environment set them.
+
+The elevated relaunch uses the same flags, so the Administrator process is also
+process-scoped. `-NoProfile` is there deliberately too: it stops a user's
+profile script from running in a process that holds Administrator rights.
+
+**On elevation and the Startup folder.** The scripts self-elevate through UAC
+rather than requiring you to right-click → Run as administrator. There is a
+catch that they handle for you: the Startup folder is per-user, so if the kiosk
+account is a *standard* user, UAC asks for some other admin account's
+credentials and the elevated process runs as that account — whose Startup folder
+is a different directory. A shortcut written there would never run at the kiosk
+user's logon, and nothing would visibly fail. So the Startup path is resolved
+*before* elevating and passed across to the elevated instance, which uses the
+value it was handed instead of looking it up again. If the two accounts differ,
+it tells you which account it is installing for.
+
+If the kiosk account is itself an administrator — the common case on a
+small-business laptop — UAC keeps the same user and none of this applies.
+
+Pass `-NoElevate` to skip the UAC prompt entirely. The scripts then do
+everything that does not need rights and report what they skipped.
 
 ## Changing it later
 
